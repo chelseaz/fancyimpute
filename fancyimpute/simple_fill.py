@@ -13,6 +13,7 @@
 from __future__ import absolute_import, print_function, division
 
 from .solver import Solver
+from .common import CompletionResult
 
 
 class SimpleFill(Solver):
@@ -35,4 +36,6 @@ class SimpleFill(Solver):
         """
         Since X is given to us already filled, just return it.
         """
-        return X
+        return CompletionResult(
+            X_filled=X,
+            U=None,V=None,S=None,rank=None)

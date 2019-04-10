@@ -17,7 +17,7 @@ import numpy as np
 from sklearn.utils.extmath import randomized_svd
 from sklearn.utils import check_array
 
-from .common import masked_mae
+from .common import masked_mae, CompletionResult
 from .solver import Solver
 
 F32PREC = np.finfo(np.float32).eps
@@ -31,11 +31,12 @@ class SoftImpute(Solver):
     """
     def __init__(
             self,
-            shrinkage_value=None,
+            shrinkage_values=np.logspace(2, -2, 9),
             convergence_threshold=0.001,
             max_iters=100,
             max_rank=None,
             n_power_iterations=1,
+            validation_frac=0.2,
             init_fill_method="zero",
             min_value=None,
             max_value=None,
@@ -44,11 +45,8 @@ class SoftImpute(Solver):
         """
         Parameters
         ----------
-        shrinkage_value : float
-            Value by which we shrink singular values on each iteration. If
-            omitted then the default value will be the maximum singular
-            value of the initialized matrix (zeros for missing values) divided
-            by 100.
+        shrinkage_value : list[float]
+            Grid of values by which we shrink singular values on each iteration.
 
         convergence_threshold : float
             Minimum ration difference between iterations (as a fraction of
@@ -86,11 +84,12 @@ class SoftImpute(Solver):
             min_value=min_value,
             max_value=max_value,
             normalizer=normalizer)
-        self.shrinkage_value = shrinkage_value
+        self.shrinkage_values = shrinkage_values
         self.convergence_threshold = convergence_threshold
         self.max_iters = max_iters
         self.max_rank = max_rank
         self.n_power_iterations = n_power_iterations
+        self.validation_frac = validation_frac
         self.verbose = verbose
 
     def _converged(self, X_old, X_new, missing_mask):
@@ -129,45 +128,27 @@ class SoftImpute(Solver):
         U_thresh = U[:, :rank]
         V_thresh = V[:rank, :]
         S_thresh = np.diag(s_thresh)
-        X_reconstruction = np.dot(U_thresh, np.dot(S_thresh, V_thresh))
-        return X_reconstruction, rank
+        return (rank, U_thresh, V_thresh, S_thresh)
 
-    def _max_singular_value(self, X_filled):
-        # quick decomposition of X_filled into rank-1 SVD
-        _, s, _ = randomized_svd(
-            X_filled,
-            1,
-            n_iter=5)
-        return s[0]
+    def get_validation_mask(self, X, observed_mask):
+        validation_mask = np.random.random(size=X.shape) < self.validation_frac
+        return np.logical_and(validation_mask, observed_mask)
 
-    def solve(self, X, missing_mask):
-        X = check_array(X, force_all_finite=False)
-
-        X_init = X.copy()
-
-        X_filled = X
+    # Run SoftImpute for a set shrinkage_value
+    def _solve(self, X_init, missing_mask, shrinkage_value, verbose=True):
+        X_filled = X_init.copy()
         observed_mask = ~missing_mask
-        max_singular_value = self._max_singular_value(X_filled)
-        if self.verbose:
-            print("[SoftImpute] Max Singular Value of X_init = %f" % (
-                max_singular_value))
-
-        if self.shrinkage_value:
-            shrinkage_value = self.shrinkage_value
-        else:
-            # totally hackish heuristic: keep only components
-            # with at least 1/50th the max singular value
-            shrinkage_value = max_singular_value / 50.0
 
         for i in range(self.max_iters):
-            X_reconstruction, rank = self._svd_step(
+            rank, U_thresh, V_thresh, S_thresh = self._svd_step(
                 X_filled,
                 shrinkage_value,
                 max_rank=self.max_rank)
+            X_reconstruction = np.dot(U_thresh, np.dot(S_thresh, V_thresh))
             X_reconstruction = self.clip(X_reconstruction)
 
             # print error on observed data
-            if self.verbose:
+            if verbose:
                 mae = masked_mae(
                     X_true=X_init,
                     X_pred=X_reconstruction,
@@ -185,9 +166,72 @@ class SoftImpute(Solver):
             X_filled[missing_mask] = X_reconstruction[missing_mask]
             if converged:
                 break
-        if self.verbose:
+        if verbose:
             print("[SoftImpute] Stopped after iteration %d for lambda=%f" % (
                 i + 1,
                 shrinkage_value))
 
-        return X_filled
+        return CompletionResult(
+            X_filled=X_filled,
+            U=U_thresh,
+            V=V_thresh,
+            S=S_thresh,
+            rank=rank)
+
+    def solve(self, X, missing_mask):
+        X = check_array(X, force_all_finite=False)
+
+        X_init = X
+
+        observed_mask = ~missing_mask
+
+        # move some observed entries into validation set for grid search
+        # these will get added to missing mask
+        # then clobber entries in missing mask and re-impute matrix
+        # to ensure validation set is truly held out
+        validation_mask = self.get_validation_mask(X, observed_mask)
+        validation_missing_mask = np.logical_or(missing_mask, validation_mask)
+        X_init_validation = X.copy()
+        X_init_validation[validation_missing_mask] = np.nan
+        self.fill(X_init_validation, validation_missing_mask, inplace=True)
+
+        # perform grid search over shrinkage values
+        # using warm starts as the paper recommends - way faster
+        best_shrinkage_value = self.shrinkage_values[0]
+        best_mae = np.inf
+        best_completion_result = None
+        completion_result = None
+
+        for shrinkage_value in self.shrinkage_values:
+            if self.verbose:
+                print("Using lambda=%f" % shrinkage_value)
+
+            if completion_result is None:
+                X_warm_start = X_init_validation
+            else:
+                X_warm_start = completion_result.X_filled
+
+            completion_result = self._solve(X_warm_start, 
+                missing_mask=validation_missing_mask, 
+                shrinkage_value=shrinkage_value, 
+                verbose=False)
+
+            # Use MAE on validation set as cross-validation metric; could try other metrics
+            validation_mae = masked_mae(
+                X_true=X_init,
+                X_pred=completion_result.X_filled,
+                mask=validation_mask)
+            print("lambda=%f: validation MAE=%0.6f" % (shrinkage_value, validation_mae))
+
+            # update best shrinkage value, if applicable
+            if validation_mae < best_mae:
+                print("lambda=%f has achieved best MAE so far" % shrinkage_value)
+                best_shrinkage_value = shrinkage_value
+                best_mae = validation_mae
+                best_completion_result = completion_result
+
+        # train model on original observed/missing split using lambda with best validation MAE
+        return self._solve(X_init, 
+            missing_mask=missing_mask, 
+            shrinkage_value=best_shrinkage_value, 
+            verbose=self.verbose)

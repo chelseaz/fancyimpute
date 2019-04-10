@@ -19,7 +19,7 @@ from six.moves import range
 
 from sklearn.utils import check_array
 
-from .common import generate_random_column_samples
+from .common import generate_random_column_samples, CompletionResult
 
 
 class Solver(object):
@@ -167,6 +167,9 @@ class Solver(object):
 
     def fit_transform(self, X, y=None):
         """
+        Returns completed matrix without any NaNs.
+        Also returns other decomposition quantities. See CompletionResult.
+
         Fit the imputer and then transform input `X`
 
         Note: all imputations should have a `fit_transform` method,
@@ -186,7 +189,8 @@ class Solver(object):
                     self.__class__.__name__,
                     type(X_filled)))
 
-        X_result = self.solve(X_filled, missing_mask)
+        completion_result = self.solve(X_filled, missing_mask)
+        X_result = completion_result.X_filled
         if not isinstance(X_result, np.ndarray):
             raise TypeError(
                 "Expected %s.solve() to return NumPy array but got %s" % (
@@ -195,7 +199,7 @@ class Solver(object):
 
         X_result = self.project_result(X=X_result)
         X_result[observed_mask] = X_original[observed_mask]
-        return X_result
+        return completion_result._replace(X_filled=X_result)
 
     def fit(self, X, y=None):
         """

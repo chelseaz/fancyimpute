@@ -17,7 +17,7 @@ from sklearn.utils import check_array
 import numpy as np
 
 from .solver import Solver
-from .common import masked_mae
+from .common import masked_mae, CompletionResult
 
 F32PREC = np.finfo(np.float32).eps
 
@@ -91,4 +91,7 @@ class IterativeSVD(Solver):
             X_filled[missing_mask] = X_reconstructed[missing_mask]
             if converged:
                 break
-        return X_filled
+
+        return CompletionResult(
+            X_filled=X,
+            U=None,V=None,S=None,rank=None)

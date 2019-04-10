@@ -11,12 +11,15 @@
 # limitations under the License.
 
 from __future__ import absolute_import, print_function, division
+from collections import namedtuple
 import logging
 import importlib
 
 import numpy as np
 from six.moves import range
 
+
+CompletionResult = namedtuple('CompletionResult', ['X_filled', 'U', 'V', 'S', 'rank'])
 
 def import_from(module, name):
     '''

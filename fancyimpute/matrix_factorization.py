@@ -19,7 +19,7 @@ from keras.layers import Input
 from keras.models import Model
 from sklearn.utils import shuffle, check_array
 
-from .common import import_from
+from .common import import_from, CompletionResult
 from .scaler import Scaler
 from .keras_models import KerasMatrixFactorizer
 from .solver import Solver
@@ -91,7 +91,8 @@ class MatrixFactorization(Solver):
             rank=self.rank,
             input_dim_i=n_samples,
             input_dim_j=n_features,
-            embeddings_regularizer=regularizers.l2(self.l2_penalty)
+            embeddings_regularizer=regularizers.l2(self.l2_penalty),
+            use_bias=self.use_bias
         )(main_input)
         model = Model(inputs=main_input, outputs=embed)
         optimizer = import_from(
@@ -116,4 +117,10 @@ class MatrixFactorization(Solver):
         ij_ts = np.vstack([i_ts, j_ts]).T  # input to factorizer
         X[i_ts, j_ts] = model.predict(ij_ts).T[0]
 
-        return X
+        model_weights = model.get_weights()
+        return CompletionResult(
+            X_filled=X,
+            U=model_weights[0],
+            V=model_weights[1].T,
+            S=None,
+            rank=self.rank)
